@@ -268,21 +268,19 @@ async function main() {
     };
     const pushRTri = (a, b, c) => { pushR(a); pushR(b); pushR(c); };
     const V = (sx, y, sz, mx, my, b) => ({ x: sx, y, z: sz, mx, my, b });
-    // clip a polygon by the half-plane { ax*x + az*z <= rhs }  (Sutherland-Hodgman)
-    const clipHP = (poly, ax, az, rhs) => {
-      const out = []; const m = poly.length;
-      for (let i = 0; i < m; i++) {
-        const cur = poly[i], prv = poly[(i + m - 1) % m];
-        const dc = ax * cur[0] + az * cur[1] - rhs, dp = ax * prv[0] + az * prv[1] - rhs;
-        const cin = dc <= 1e-9, pin = dp <= 1e-9;
-        if (cin) {
-          if (!pin) { const t = dp / (dp - dc); out.push([prv[0] + t * (cur[0] - prv[0]), prv[1] + t * (cur[1] - prv[1])]); }
-          out.push(cur);
-        } else if (pin) {
-          const t = dp / (dp - dc); out.push([prv[0] + t * (cur[0] - prv[0]), prv[1] + t * (cur[1] - prv[1])]);
-        }
+    // distance from point (x,z) to the nearest point on the footprint boundary
+    const distToBoundary = (x, z, edges) => {
+      let best = Infinity;
+      for (const [a, b] of edges) {
+        const dx = b[0] - a[0], dz = b[1] - a[1];
+        const L2 = dx * dx + dz * dz || 1;
+        let t = ((x - a[0]) * dx + (z - a[1]) * dz) / L2;
+        t = Math.max(0, Math.min(1, t));
+        const px = a[0] + t * dx, pz = a[1] + t * dz;
+        const d = Math.hypot(x - px, z - pz);
+        if (d < best) best = d;
       }
-      return out;
+      return best;
     };
     for (const f of (fc.features || [])) {
       const ringRaw = f.geometry.coordinates[0];
@@ -307,57 +305,52 @@ async function main() {
 
       let wallTop = top;
       if (f.properties.roof_white) {
-        // white (lime-washed) roof -> uniform 20° "straight-skeleton" roof:
-        // EVERY wall throws a face sloping inward at 20°, perpendicular to that
-        // wall; each face stops where it meets the opposing faces (the ridge/
-        // hip lines). Works for any footprint, not just rectangles. The roof
-        // image is mapped at EXACT pixel colour (no shading — grey is walls-only).
+        // white (lime-washed) roof -> uniform 20° straight-skeleton roof. The
+        // roof surface is exactly height = tan(20°) * (distance to the nearest
+        // boundary point): every wall slopes inward at 20°, faces meet at ridges,
+        // and reflex corners form valleys — correct for COMPLEX (concave)
+        // polygons, with intersections coming from any direction. Rendered by
+        // triangulating the footprint and subdividing, sampling that field.
+        // Roof image at EXACT pixel colour (no shading — grey is walls-only).
         try {
           const PITCH = 20 * Math.PI / 180, tanP = Math.tan(PITCH);
-          let Cx = 0, Cz = 0;
-          for (const p of sc) { Cx += p[0]; Cz += p[1]; }
-          Cx /= n; Cz /= n;
-          const E = [];                          // inward unit normal per wall edge
-          for (let k = 0; k < n; k++) {
-            const a = sc[k], b = sc[(k + 1) % n];
-            let nx = -(b[1] - a[1]), nz = (b[0] - a[0]);
-            const L = Math.hypot(nx, nz) || 1; nx /= L; nz /= L;
-            if ((Cx - a[0]) * nx + (Cz - a[1]) * nz < 0) { nx = -nx; nz = -nz; }
-            E.push({ ax: a[0], az: a[1], nx, nz });
-          }
-          const foot = sc.map(p => [p[0], p[1]]);
-          const faces = []; let maxD = 0;
-          for (let k = 0; k < n; k++) {           // face of wall k = where wall k is nearest
-            const e = E[k];
-            let poly = foot;
-            for (let j = 0; j < n && poly.length >= 3; j++) {
-              if (j === k) continue;
-              const g = E[j];
-              const ax = e.nx - g.nx, az = e.nz - g.nz;          // bisector half-plane:
-              if (Math.hypot(ax, az) < 1e-9) continue;            //  dist_k <= dist_j
-              const rhs = (e.nx * e.ax + e.nz * e.az) - (g.nx * g.ax + g.nz * g.az);
-              poly = clipHP(poly, ax, az, rhs);
+          const contour = sc.map(([sx, sz]) => new THREE.Vector2(sx, sz));
+          let tris = THREE.ShapeUtils.triangulateShape(contour, []);
+          if (!tris.length) throw new Error('degenerate');
+          const verts = sc.map(p => [p[0], p[1]]);        // mesh verts (scene x,z)
+          let mesh = tris.map(t => [t[0], t[1], t[2]]);
+          // subdivide so the distance field (ridges/valleys) is well sampled
+          let dim = 0;
+          { let xn = 1e9, xx = -1e9, zn = 1e9, zx = -1e9;
+            for (const p of sc) { xn = Math.min(xn, p[0]); xx = Math.max(xx, p[0]); zn = Math.min(zn, p[1]); zx = Math.max(zx, p[1]); }
+            dim = Math.max(xx - xn, zx - zn); }
+          const levels = Math.min(4, Math.max(1, Math.round(Math.log2(Math.max(2, dim) / 2))));
+          for (let lv = 0; lv < levels; lv++) {
+            const mid = new Map(), nt = [];
+            const midpoint = (a, b) => {
+              const key = a < b ? a + '_' + b : b + '_' + a;
+              let m = mid.get(key);
+              if (m === undefined) { m = verts.length; verts.push([(verts[a][0] + verts[b][0]) / 2, (verts[a][1] + verts[b][1]) / 2]); mid.set(key, m); }
+              return m;
+            };
+            for (const [a, b, c] of mesh) {
+              const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+              nt.push([a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]);
             }
-            if (poly.length >= 3) {
-              faces.push({ e, poly });
-              for (const p of poly) {
-                const d = e.nx * (p[0] - e.ax) + e.nz * (p[1] - e.az);
-                if (d > maxD) maxD = d;
-              }
-            }
+            mesh = nt;
           }
-          if (!faces.length) throw new Error('degenerate');
-          const apexH = tanP * maxD;             // roof apex height (m); 20° everywhere
-          wallTop = Math.max(base, top - apexH); // building height reduced by the roof
+          const edges = [];
+          for (let i = 0; i < n; i++) edges.push([sc[i], sc[(i + 1) % n]]);
+          const dist = verts.map(v => distToBoundary(v[0], v[1], edges));
+          let maxD = 0; for (const d of dist) if (d > maxD) maxD = d;
+          const apexH = tanP * maxD;
+          wallTop = Math.max(base, top - apexH);          // height reduced by the roof
           const eaveY = wallTop;
-          for (const { e, poly } of faces) {
-            const vs = poly.map(p => {
-              const d = Math.max(0, e.nx * (p[0] - e.ax) + e.nz * (p[1] - e.az));
-              const [mx, my] = sceneToMerc(p[0], p[1]);
-              return V(p[0], eaveY + tanP * d, p[1], mx, my, 1);   // 20° rise, full colour
-            });
-            for (let t = 1; t < vs.length - 1; t++) pushRTri(vs[0], vs[t], vs[t + 1]);
-          }
+          const Vm = verts.map((v, i) => {
+            const [mx, my] = sceneToMerc(v[0], v[1]);
+            return V(v[0], eaveY + tanP * dist[i], v[1], mx, my, 1);
+          });
+          for (const [a, b, c] of mesh) pushRTri(Vm[a], Vm[b], Vm[c]);
         } catch (_) {
           wallTop = top; flatRoof(top);          // fallback: flat roof
         }
