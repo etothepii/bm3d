@@ -1,0 +1,684 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Bermuda parcel 3D terrain</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b1015;
+    font-family: -apple-system, system-ui, Segoe UI, Roboto, sans-serif; color: #e8eef4;
+    -webkit-text-size-adjust: 100%; overscroll-behavior: none; }
+  /* touch-action:none stops iOS Safari pinch/double-tap from zooming the page so
+     the gesture reaches the WebGL canvas (OrbitControls). user-select off avoids
+     accidental text selection while dragging. */
+  #app { position: fixed; inset: 0; touch-action: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent; }
+  canvas { touch-action: none; display: block; }
+  #burger { position: fixed; top: 12px; left: 12px; width: 44px; height: 44px; z-index: 20;
+    display: grid; place-items: center; font-size: 20px; line-height: 1; padding: 0;
+    background: rgba(16,22,30,.86); border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
+    color: #e8eef4; backdrop-filter: blur(6px); }
+  #panel { position: fixed; top: 64px; left: 12px; width: 268px; max-height: calc(100% - 76px);
+    overflow-y: auto; background: rgba(16,22,30,.86); border: 1px solid rgba(255,255,255,.12);
+    border-radius: 10px; padding: 14px 16px; font-size: 13px; backdrop-filter: blur(6px);
+    display: none; }
+  #panel.open { display: block; }
+  #panel h1 { font-size: 14px; margin: 0 0 8px; }
+  #panel .sub { color: #9fb0c0; font-size: 11px; margin: -4px 0 10px; }
+  .row { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
+  .row label { cursor: pointer; }
+  input[type=range] { width: 130px; }
+  hr { border: 0; border-top: 1px solid rgba(255,255,255,.1); margin: 12px 0; }
+  button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px;
+    cursor: pointer; font-size: 12px; }
+  button:hover { background: #2b7bf6; }
+  .stat { color: #9fb0c0; font-size: 11px; line-height: 1.5; }
+  .stat b { color: #e8eef4; font-weight: 600; }
+  #readout { position: fixed; bottom: 12px; left: 12px; background: rgba(16,22,30,.86);
+    border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 8px 12px;
+    font-size: 12px; font-variant-numeric: tabular-nums; }
+  #panel .credit { color: #8595a5; font-size: 10.5px; line-height: 1.4; }
+  #north { position: fixed; top: 14px; right: 16px; width: 56px; height: 56px; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; padding: 40px;
+    background: #0b1015; color: #ff8080; font-family: monospace; white-space: pre-wrap; }
+  #ve_val { width: 34px; text-align: right; display: inline-block; }
+</style>
+
+<div id="app"></div>
+<canvas id="north" width="56" height="56"></canvas>
+
+<button id="burger" aria-label="Toggle menu">&#9776;</button>
+
+<div id="panel">
+  <h1 id="title">Study area</h1>
+  <div class="sub" id="subtitle"></div>
+
+  <div class="row">
+    <label for="ve">Vertical exaggeration</label>
+    <span><span id="ve_val">1.0</span>&times;</span>
+  </div>
+  <div class="row"><input type="range" id="ve" min="1" max="6" step="0.5" value="1" style="width:100%"></div>
+
+  <hr>
+  <div class="row"><label><input type="checkbox" id="t_img" checked> Imagery</label></div>
+  <div class="row"><label><input type="checkbox" id="t_con" checked> Contours</label></div>
+  <div class="row"><label><input type="checkbox" id="t_par"> Parcels</label></div>
+  <div class="row"><label><input type="checkbox" id="t_bld" checked> Buildings</label></div>
+
+  <hr>
+  <div class="row"><button id="reset">Reset view</button></div>
+
+  <hr>
+  <div class="stat" id="aoi"></div>
+
+  <hr>
+  <div class="credit">&copy; Government of Bermuda. Parcel, contour, elevation &amp;
+    2019 imagery data &mdash; not for commercial use.</div>
+</div>
+
+<div id="readout">Tap the terrain to read lon / lat / elevation.</div>
+<div id="err"></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three.module.js",
+  "three/addons/": "./vendor/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from './vendor/OrbitControls.js';
+
+const fail = (m) => { const e = document.getElementById('err');
+  e.style.display = 'grid'; e.textContent = 'Error:\n' + m; console.error(m); };
+
+async function loadBin(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch ' + url + ' -> ' + r.status);
+  return new Float32Array(await r.arrayBuffer());
+}
+async function loadJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch ' + url + ' -> ' + r.status);
+  return r.json();
+}
+
+// Web-Mercator -> lon/lat (degrees)
+const R = 6378137.0;
+function mercToLonLat(x, y) {
+  const lon = (x / R) * 180 / Math.PI;
+  const lat = (2 * Math.atan(Math.exp(y / R)) - Math.PI / 2) * 180 / Math.PI;
+  return [lon, lat];
+}
+
+main().catch(e => fail(e.stack || String(e)));
+
+async function main() {
+  const [dem, basemap, study] = await Promise.all([
+    loadJSON('./data/dem.json'),
+    loadJSON('./data/basemap.json').catch(() => null),
+    loadJSON('./data/study_area.json').catch(() => null),
+  ]);
+  const elev = await loadBin('./data/dem.bin');
+
+  const { nx, ny } = dem;
+  const [xmin, ymin, xmax, ymax] = dem.bbox_3857;
+  const cellx = dem.cellx_merc, celly = dem.celly_merc;
+  const scale = dem.scale_ground_per_merc;
+  const resx = cellx * scale, resy = celly * scale;   // ground metres / cell
+  const W = (nx - 1) * resx, D = (ny - 1) * resy;
+
+  // ---- coordinate helpers (local/group space, pre vertical-exaggeration) ----
+  function elevMerc(mx, my) {
+    let cf = (mx - xmin) / cellx;
+    let rf = (ymax - my) / celly;
+    cf = Math.max(0, Math.min(nx - 1, cf));
+    rf = Math.max(0, Math.min(ny - 1, rf));
+    const c0 = Math.floor(cf), r0 = Math.floor(rf);
+    const c1 = Math.min(c0 + 1, nx - 1), r1 = Math.min(r0 + 1, ny - 1);
+    const fx = cf - c0, fy = rf - r0;
+    const a = elev[r0 * nx + c0], b = elev[r0 * nx + c1];
+    const c = elev[r1 * nx + c0], d = elev[r1 * nx + c1];
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+  }
+  function mercToScene(mx, my) {
+    const cf = (mx - xmin) / cellx, rf = (ymax - my) / celly;
+    return [cf * resx - W / 2, rf * resy - D / 2];
+  }
+  function sceneToMerc(sx, sz) {
+    const cf = (sx + W / 2) / resx, rf = (sz + D / 2) / resy;
+    return [xmin + cf * cellx, ymax - rf * celly];
+  }
+  function drape(mx, my, lift) {
+    // clamp to the study bbox so overlay vertices outside the terrain footprint
+    // (neighbouring parcels / contours that merely intersect the bbox) snap to
+    // the edge instead of trailing off into empty space.
+    mx = Math.max(xmin, Math.min(xmax, mx));
+    my = Math.max(ymin, Math.min(ymax, my));
+    const [sx, sz] = mercToScene(mx, my);
+    return new THREE.Vector3(sx, elevMerc(mx, my) + (lift || 0), sz);
+  }
+
+  // ---- scene ----
+  const app = document.getElementById('app');
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  renderer.setSize(innerWidth, innerHeight);
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0b1015);
+  const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.5, 100000);
+
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.maxPolarAngle = Math.PI / 2 - 0.05;   // just under horizontal
+  controls.screenSpacePanning = false;
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x35506b, 1.15));
+
+  // group whose scale.y is the vertical exaggeration; everything draped lives here
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // ---- terrain mesh ----
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(nx * ny * 3);
+  const uv = new Float32Array(nx * ny * 2);
+  for (let r = 0; r < ny; r++) {
+    for (let c = 0; c < nx; c++) {
+      const i = r * nx + c;
+      pos[i * 3]     = c * resx - W / 2;
+      pos[i * 3 + 1] = elev[i];
+      pos[i * 3 + 2] = r * resy - D / 2;
+      uv[i * 2]     = c / (nx - 1);
+      uv[i * 2 + 1] = 1 - r / (ny - 1);   // image row 0 = north = ymax
+    }
+  }
+  const idx = [];
+  for (let r = 0; r < ny - 1; r++) {
+    for (let c = 0; c < nx - 1; c++) {
+      const a = r * nx + c, b = a + 1, d = a + nx, e = d + 1;
+      idx.push(a, d, b, b, d, e);
+    }
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+
+  let material, bmTex = null;
+  if (basemap) {
+    bmTex = await new THREE.TextureLoader().loadAsync('./data/' + basemap.image);
+    bmTex.colorSpace = THREE.SRGBColorSpace;
+    bmTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    material = new THREE.MeshBasicMaterial({ map: bmTex });
+  } else {
+    material = new THREE.MeshLambertMaterial({ color: 0x6b7d5b });
+  }
+  // basemap UV for any merc point, matching the terrain's UV mapping
+  const uvOf = (mx, my) => [(mx - xmin) / (xmax - xmin), (my - ymin) / (ymax - ymin)];
+  const terrain = new THREE.Mesh(geo, material);
+  group.add(terrain);
+
+  // ---- overlays ----
+  const requested = new Set((study && study.parcels || []).map(p => String(p.PARCELID)));
+
+  function drapedLine(coords, mat, lift) {
+    const pts = coords.map(([x, y]) => drape(x, y, lift));
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(g, mat);
+    line.renderOrder = 10;
+    return line;
+  }
+
+  async function addPolygons(url, group3d, matMaker, lift) {
+    let fc;
+    try { fc = await loadJSON(url); } catch { return []; }
+    const feats = fc.features || [];
+    for (const f of feats) {
+      const rings = f.geometry.type === 'Polygon'
+        ? f.geometry.coordinates : f.geometry.coordinates.flat(1);
+      for (const ring of rings) {
+        group3d.add(drapedLine(ring, matMaker(f), lift));
+      }
+    }
+    return feats;
+  }
+
+  // parcels
+  const parcelGroup = new THREE.Group(); group.add(parcelGroup);
+  // depthTest:true so parcels are occluded by terrain in front of them — they
+  // read as painted onto the ground, not floating x-ray lines through hills.
+  const matReq = new THREE.LineBasicMaterial({ color: 0xffd34d });
+  const matOther = new THREE.LineBasicMaterial({ color: 0x66e0ff, transparent: true, opacity: 0.6 });
+  const parcelFeats = await addPolygons('./data/parcels.geojson', parcelGroup,
+    (f) => requested.has(String(f.properties.PARCELID)) ? matReq : matOther, 0.8);
+
+  // buildings — extruded to real heights (BuildingEl - ground, precomputed)
+  const bldGroup = new THREE.Group(); bldGroup.visible = false; group.add(bldGroup);
+  async function addBuildings(url) {
+    let fc; try { fc = await loadJSON(url); } catch { return; }
+    const WP = [];                       // wall positions (plain grey, no texture)
+    const RP = [], RUV = [], RCOL = [];  // roof positions + basemap UVs + baked shade
+    const pushW = (v) => { WP.push(v.x, v.y, v.z); };
+    const pushWTri = (a, b, c) => { pushW(a); pushW(b); pushW(c); };
+    const pushR = (v) => {
+      RP.push(v.x, v.y, v.z);
+      const t = uvOf(v.mx, v.my); RUV.push(t[0], t[1]);
+      const b = v.b ?? 1; RCOL.push(b, b, b);
+    };
+    const pushRTri = (a, b, c) => { pushR(a); pushR(b); pushR(c); };
+    const V = (sx, y, sz, mx, my, b) => ({ x: sx, y, z: sz, mx, my, b });
+    // distance from point (x,z) to the nearest point on the footprint boundary
+    const distToBoundary = (x, z, edges) => {
+      let best = Infinity;
+      for (const [a, b] of edges) {
+        const dx = b[0] - a[0], dz = b[1] - a[1];
+        const L2 = dx * dx + dz * dz || 1;
+        let t = ((x - a[0]) * dx + (z - a[1]) * dz) / L2;
+        t = Math.max(0, Math.min(1, t));
+        const px = a[0] + t * dx, pz = a[1] + t * dz;
+        const d = Math.hypot(x - px, z - pz);
+        if (d < best) best = d;
+      }
+      return best;
+    };
+    for (const f of (fc.features || [])) {
+      const ringRaw = f.geometry.coordinates[0];
+      if (!ringRaw || ringRaw.length < 4) continue;
+      const ring = ringRaw.slice(0, -1);          // drop closing duplicate
+      if (ring.length < 3) continue;
+      const base = f.properties.base_m ?? 0;
+      const top = base + (f.properties.height_m ?? 5);   // overall building top
+      const sc = ring.map(([mx, my]) => mercToScene(mx, my));   // footprint ring scene
+      const n = ring.length;
+
+      // flat roof at height y — full-brightness orthophoto (exact pixel colour)
+      const flatRoof = (y) => {
+        const contour = sc.map(([sx, sz]) => new THREE.Vector2(sx, sz));
+        let tris = [];
+        try { tris = THREE.ShapeUtils.triangulateShape(contour, []); } catch { tris = []; }
+        for (const t of tris) pushRTri(
+          V(sc[t[0]][0], y, sc[t[0]][1], ring[t[0]][0], ring[t[0]][1], 1),
+          V(sc[t[1]][0], y, sc[t[1]][1], ring[t[1]][0], ring[t[1]][1], 1),
+          V(sc[t[2]][0], y, sc[t[2]][1], ring[t[2]][0], ring[t[2]][1], 1));
+      };
+
+      let wallTop = top;
+      if (f.properties.roof_white) {
+        // white (lime-washed) roof -> uniform 20° straight-skeleton roof. The
+        // roof surface is exactly height = tan(20°) * (distance to the nearest
+        // boundary point): every wall slopes inward at 20°, faces meet at ridges,
+        // and reflex corners form valleys — correct for COMPLEX (concave)
+        // polygons, with intersections coming from any direction. Rendered by
+        // triangulating the footprint and subdividing, sampling that field.
+        // Roof image at EXACT pixel colour (no shading — grey is walls-only).
+        try {
+          const PITCH = 20 * Math.PI / 180, tanP = Math.tan(PITCH);
+          const contour = sc.map(([sx, sz]) => new THREE.Vector2(sx, sz));
+          let tris = THREE.ShapeUtils.triangulateShape(contour, []);
+          if (!tris.length) throw new Error('degenerate');
+          const verts = sc.map(p => [p[0], p[1]]);        // mesh verts (scene x,z)
+          let mesh = tris.map(t => [t[0], t[1], t[2]]);
+          // subdivide so the distance field (ridges/valleys) is well sampled
+          let dim = 0;
+          { let xn = 1e9, xx = -1e9, zn = 1e9, zx = -1e9;
+            for (const p of sc) { xn = Math.min(xn, p[0]); xx = Math.max(xx, p[0]); zn = Math.min(zn, p[1]); zx = Math.max(zx, p[1]); }
+            dim = Math.max(xx - xn, zx - zn); }
+          const levels = Math.min(4, Math.max(1, Math.round(Math.log2(Math.max(2, dim) / 2))));
+          for (let lv = 0; lv < levels; lv++) {
+            const mid = new Map(), nt = [];
+            const midpoint = (a, b) => {
+              const key = a < b ? a + '_' + b : b + '_' + a;
+              let m = mid.get(key);
+              if (m === undefined) { m = verts.length; verts.push([(verts[a][0] + verts[b][0]) / 2, (verts[a][1] + verts[b][1]) / 2]); mid.set(key, m); }
+              return m;
+            };
+            for (const [a, b, c] of mesh) {
+              const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+              nt.push([a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]);
+            }
+            mesh = nt;
+          }
+          const edges = [];
+          for (let i = 0; i < n; i++) edges.push([sc[i], sc[(i + 1) % n]]);
+          const dist = verts.map(v => distToBoundary(v[0], v[1], edges));
+          let maxD = 0; for (const d of dist) if (d > maxD) maxD = d;
+          const apexH = tanP * maxD;
+          wallTop = Math.max(base, top - apexH);          // height reduced by the roof
+          const eaveY = wallTop;
+          const Vm = verts.map((v, i) => {
+            const [mx, my] = sceneToMerc(v[0], v[1]);
+            return V(v[0], eaveY + tanP * dist[i], v[1], mx, my, 1);
+          });
+          for (const [a, b, c] of mesh) pushRTri(Vm[a], Vm[b], Vm[c]);
+        } catch (_) {
+          wallTop = top; flatRoof(top);          // fallback: flat roof
+        }
+      } else {
+        flatRoof(top);                           // non-white roof -> flat
+      }
+
+      // vertical walls — plain grey (no imagery), up to the eave (wallTop)
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        pushWTri(V(sc[i][0], base, sc[i][1]), V(sc[j][0], base, sc[j][1]), V(sc[j][0], wallTop, sc[j][1]));
+        pushWTri(V(sc[i][0], base, sc[i][1]), V(sc[j][0], wallTop, sc[j][1]), V(sc[i][0], wallTop, sc[i][1]));
+      }
+    }
+    // walls: plain grey, unlit
+    if (WP.length) {
+      const gw = new THREE.BufferGeometry();
+      gw.setAttribute('position', new THREE.BufferAttribute(new Float32Array(WP), 3));
+      bldGroup.add(new THREE.Mesh(gw,
+        new THREE.MeshBasicMaterial({ color: 0x9b978f, side: THREE.DoubleSide })));
+    }
+    // roofs: draped orthophoto at exact pixel colour (no shading; grey is walls-only)
+    if (RP.length) {
+      const gr = new THREE.BufferGeometry();
+      gr.setAttribute('position', new THREE.BufferAttribute(new Float32Array(RP), 3));
+      gr.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(RUV), 2));
+      gr.setAttribute('color', new THREE.BufferAttribute(new Float32Array(RCOL), 3));
+      gr.computeVertexNormals();   // for the no-imagery Lambert fallback
+      const mat = bmTex
+        ? new THREE.MeshBasicMaterial({ map: bmTex, vertexColors: true, side: THREE.DoubleSide })
+        : new THREE.MeshLambertMaterial({ color: 0xd8cdbf, side: THREE.DoubleSide });
+      bldGroup.add(new THREE.Mesh(gr, mat));
+    }
+  }
+  await addBuildings('./data/buildings.geojson');
+
+  // contours
+  const conGroup = new THREE.Group(); group.add(conGroup);
+  const matMinor = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.30 });
+  const matMajor = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.70 });
+  try {
+    const fc = await loadJSON('./data/contours.geojson');
+    for (const f of (fc.features || [])) {
+      const z = f.properties.Contour;
+      const mat = (z != null && z % 5 === 0) ? matMajor : matMinor;
+      const lines = f.geometry.type === 'LineString'
+        ? [f.geometry.coordinates] : f.geometry.coordinates;
+      for (const line of lines) conGroup.add(drapedLine(line, mat, 0.25));
+    }
+  } catch { /* no contours */ }
+
+  // ---- framing / camera ----
+  const cx = 0, cz = 0;
+  const midElev = (dem.zmin + dem.zmax) / 2;
+  const span = Math.max(W, D);
+  function defaultPose() {
+    camera.position.set(cx + span * 0.0, midElev * 2 + span * 0.6, cz + span * 0.9);
+    controls.target.set(cx, midElev, cz);
+    controls.update();
+  }
+  const saved = localStorage.getItem('bm3d_cam');
+  if (saved) {
+    try {
+      const s = JSON.parse(saved);
+      camera.position.fromArray(s.p); controls.target.fromArray(s.t); controls.update();
+    } catch { defaultPose(); }
+  } else { defaultPose(); }
+
+  // ---- UI ----
+  const ve = document.getElementById('ve'), veVal = document.getElementById('ve_val');
+  function applyVE() { group.scale.y = parseFloat(ve.value); veVal.textContent = parseFloat(ve.value).toFixed(1); }
+  ve.addEventListener('input', applyVE); applyVE();
+
+  // bind a checkbox to a layer's visibility AND apply its initial (default) state,
+  // so layers that start unchecked (contours, parcels, buildings) start hidden.
+  function bindLayer(id, obj) {
+    const cb = document.getElementById(id);
+    const apply = () => { obj.visible = cb.checked; };
+    cb.addEventListener('change', apply);
+    apply();
+  }
+  bindLayer('t_img', terrain);
+  bindLayer('t_con', conGroup);
+  bindLayer('t_par', parcelGroup);
+  bindLayer('t_bld', bldGroup);
+  document.getElementById('reset').addEventListener('click', () => { localStorage.removeItem('bm3d_cam'); defaultPose(); });
+
+  // burger menu — panel hidden by default, toggled open
+  const burger = document.getElementById('burger'), panel = document.getElementById('panel');
+  burger.addEventListener('click', () => {
+    const open = panel.classList.toggle('open');
+    burger.innerHTML = open ? '&#10005;' : '&#9776;';   // × when open, ☰ when closed
+    burger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  // AOI readout
+  if (study) {
+    const ids = (study.parcels || []).map(p => p.PARCELID).join(', ');
+    document.getElementById('title').textContent = 'Parcels ' + (ids || '—');
+    const ac = (study.parcels || []).reduce((s, p) => s + (p.Acreage || 0), 0);
+    const names = [...new Set((study.parcels || []).map(p => p.LocationPropertyName).filter(Boolean))];
+    document.getElementById('subtitle').textContent = names.join(' / ');
+    document.getElementById('aoi').innerHTML =
+      'Parcels: <b>' + (study.parcels || []).length + '</b><br>' +
+      'Acreage: <b>' + ac.toFixed(2) + '</b><br>' +
+      'Elevation: <b>' + dem.zmin.toFixed(1) + '</b> – <b>' + dem.zmax.toFixed(1) + '</b> m<br>' +
+      'Radius buffer: <b>' + (study.radius_m != null ? study.radius_m + ' m' : '—') + '</b>';
+  } else {
+    document.getElementById('aoi').innerHTML =
+      'Elevation: <b>' + dem.zmin.toFixed(1) + '</b> – <b>' + dem.zmax.toFixed(1) + '</b> m';
+  }
+
+  // ---- pick: click terrain -> lon/lat/elev + parcel id ----
+  const ray = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  function pointInRing(mx, my, ring) {
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const xi = ring[i][0], yi = ring[i][1], xj = ring[j][0], yj = ring[j][1];
+      if (((yi > my) !== (yj > my)) && (mx < (xj - xi) * (my - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+  function parcelAt(mx, my) {
+    for (const f of parcelFeats) {
+      const rings = f.geometry.type === 'Polygon' ? f.geometry.coordinates : f.geometry.coordinates.flat(1);
+      if (rings.length && pointInRing(mx, my, rings[0])) return f.properties.PARCELID;
+    }
+    return null;
+  }
+  // tap-to-identify: remember where the press started; only pick if the finger/
+  // mouse barely moved (otherwise it was an orbit/pan/pinch gesture, not a tap).
+  let downXY = null;
+  const pointers = new Map();        // active pointers (for walk-mode gestures)
+  let pinchStart = 0, lpTimer = null;   // lpTimer = long-press-to-enter-walk timer
+  const pinchDist = () => {
+    const v = [...pointers.values()];
+    return v.length < 2 ? 0 : Math.hypot(v[0][0] - v[1][0], v[0][1] - v[1][1]);
+  };
+  const cancelLongPress = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  renderer.domElement.addEventListener('pointerdown', (ev) => {
+    downXY = [ev.clientX, ev.clientY];
+    if (mode === 'walk') {
+      pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+      try { renderer.domElement.setPointerCapture(ev.pointerId); } catch (_) {}
+      if (pointers.size === 1) { walkPress = true; pressX = curX = ev.clientX; pressY = curY = ev.clientY; }
+      else if (pointers.size === 2) { walkPress = false; pinchStart = pinchDist(); }
+    } else {
+      // long-press to enter walk mode (touch-friendly; double-click also works)
+      cancelLongPress();
+      const id = ev.pointerId, x = ev.clientX, y = ev.clientY;
+      lpTimer = setTimeout(() => {
+        lpTimer = null;
+        ndc.x = (x / innerWidth) * 2 - 1; ndc.y = -(y / innerHeight) * 2 + 1;
+        ray.setFromCamera(ndc, camera);
+        const hit = ray.intersectObject(terrain, false)[0];
+        if (hit) {
+          enterWalk(hit.point.x, hit.point.z);
+          pointers.set(id, [x, y]); walkPress = true; pressX = curX = x; pressY = curY = y;   // held finger keeps walking
+        }
+      }, 500);
+    }
+  });
+  renderer.domElement.addEventListener('pointermove', (ev) => {
+    if (mode === 'walk') {
+      if (pointers.has(ev.pointerId)) pointers.set(ev.pointerId, [ev.clientX, ev.clientY]);
+      if (pointers.size === 1 && walkPress) { curX = ev.clientX; curY = ev.clientY; }   // drag = steer + throttle
+      else if (pointers.size === 2 && pinchStart > 0 && pinchDist() / pinchStart > 1.3) exitWalk();  // pinch-out = exit
+      return;
+    }
+    // orbit: a moving pointer is an orbit/pan drag, so it isn't a long-press
+    if (lpTimer && downXY && Math.hypot(ev.clientX - downXY[0], ev.clientY - downXY[1]) > 10) cancelLongPress();
+  });
+  const endPointer = (ev) => {
+    pointers.delete(ev.pointerId);
+    if (pointers.size < 2) pinchStart = 0;
+    if (pointers.size === 0) walkPress = false;
+  };
+  renderer.domElement.addEventListener('pointercancel', (ev) => { downXY = null; cancelLongPress(); endPointer(ev); });
+  renderer.domElement.addEventListener('pointerup', (ev) => {
+    if (mode === 'walk') { downXY = null; endPointer(ev); return; }   // taps do nothing while walking
+    cancelLongPress();
+    if (!downXY) return;
+    const moved = Math.hypot(ev.clientX - downXY[0], ev.clientY - downXY[1]);
+    downXY = null;
+    if (moved > 8) return;            // it was a drag, not a tap
+    ndc.x = (ev.clientX / innerWidth) * 2 - 1;
+    ndc.y = -(ev.clientY / innerHeight) * 2 + 1;
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.intersectObject(terrain, false)[0];
+    if (!hit) return;
+    const [mx, my] = sceneToMerc(hit.point.x, hit.point.z);
+    const [lon, lat] = mercToLonLat(mx, my);
+    const elevation = hit.point.y / group.scale.y;
+    const pid = parcelAt(mx, my);
+    document.getElementById('readout').innerHTML =
+      'lon <b>' + lon.toFixed(6) + '</b>  lat <b>' + lat.toFixed(6) + '</b>  ' +
+      'elev <b>' + elevation.toFixed(1) + ' m</b>' + (pid ? '  parcel <b>' + pid + '</b>' : '');
+  });
+
+  // ---- first-person walk mode ----
+  // Double-click the terrain to stand there with eyes ~170 cm above the ground;
+  // arrows move/turn, Shift runs, Esc exits. Eye height tracks the elevation of
+  // wherever you currently stand.
+  const EYE_M = 1.70;
+  const SPEED_WALK = 1.788;   // 4 mph in m/s
+  const SPEED_RUN = 9.835;    // 22 mph in m/s
+  const TURN_RATE = 1.6;      // rad/s
+  let mode = 'orbit';
+  let walkX = 0, walkZ = 0, yaw = 0, savedCam = null, savedVE = 1;
+  let walkPress = false, pressX = 0, curX = 0, pressY = 0, curY = 0, walkSpeedMul = 1;
+  const keys = new Set();
+  const readoutEl = document.getElementById('readout');
+  const ORBIT_HINT = 'Tap to read lon / lat / elevation · long-press or double-click to walk.';
+  readoutEl.textContent = ORBIT_HINT;
+
+  function groundAtScene(sx, sz) {
+    const [mx, my] = sceneToMerc(sx, sz);
+    return elevMerc(mx, my);              // true elevation in metres
+  }
+  function enterWalk(sx, sz) {
+    mode = 'walk';
+    walkX = sx; walkZ = sz;
+    walkPress = false; walkSpeedMul = 1; pointers.clear(); pinchStart = 0;
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    yaw = Math.atan2(dir.x, -dir.z);      // start facing current view direction
+    savedCam = { p: camera.position.toArray(), t: controls.target.toArray() };
+    savedVE = group.scale.y;
+    group.scale.y = 1;                    // true scale so 170 cm is realistic
+    controls.enabled = false;
+    readoutEl.innerHTML = '<b>Walk mode</b> — hold to walk, drag L/R to steer, ' +
+      'drag up/down or wheel for speed; pinch-out or Esc to exit.';
+  }
+  function exitWalk() {
+    mode = 'orbit';
+    walkPress = false; pointers.clear(); pinchStart = 0;
+    group.scale.y = savedVE;
+    controls.enabled = true;
+    if (savedCam) { camera.position.fromArray(savedCam.p); controls.target.fromArray(savedCam.t); }
+    controls.update();
+    readoutEl.textContent = ORBIT_HINT;
+  }
+  function updateWalk(dt) {
+    if (keys.has('arrowleft')) yaw -= TURN_RATE * dt;
+    if (keys.has('arrowright')) yaw += TURN_RATE * dt;
+    let mv = 0;
+    if (keys.has('arrowup')) mv += 1;
+    if (keys.has('arrowdown')) mv -= 1;
+    // press/hold = walk; drag left/right of the press point = steer; drag up/down
+    // = throttle (up faster, down slower/reverse) — the touch substitute for the
+    // scroll wheel, and works with the mouse too.
+    if (walkPress && pointers.size <= 1) {
+      const offx = Math.max(-1, Math.min(1, (curX - pressX) / (innerWidth * 0.22)));
+      yaw += offx * TURN_RATE * dt;
+      const thr = (pressY - curY) / (innerHeight * 0.30);   // up = positive
+      mv += thr > 0.1 ? Math.min(thr, 3) : (thr < -0.4 ? Math.max(thr, -1) : 1);
+    }
+    const fx = Math.sin(yaw), fz = -Math.cos(yaw);   // yaw 0 => facing north (-Z)
+    const step = (keys.has('shift') ? SPEED_RUN : SPEED_WALK) * walkSpeedMul * dt * mv;
+    walkX = Math.max(-W / 2, Math.min(W / 2, walkX + fx * step));
+    walkZ = Math.max(-D / 2, Math.min(D / 2, walkZ + fz * step));
+    const ve = group.scale.y;   // normally 1 in walk mode; respect it if changed
+    camera.position.set(walkX, groundAtScene(walkX, walkZ) * ve + EYE_M, walkZ);
+    const tx = walkX + fx, tz = walkZ + fz;
+    camera.lookAt(tx, groundAtScene(tx, tz) * ve + EYE_M, tz);
+  }
+  renderer.domElement.addEventListener('dblclick', (ev) => {
+    ndc.x = (ev.clientX / innerWidth) * 2 - 1;
+    ndc.y = -(ev.clientY / innerHeight) * 2 + 1;
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.intersectObject(terrain, false)[0];
+    if (hit) enterWalk(hit.point.x, hit.point.z);
+  });
+  // wheel: in walk mode, adjust speed; trackpad pinch-out (ctrl+wheel) exits
+  renderer.domElement.addEventListener('wheel', (ev) => {
+    if (mode !== 'walk') return;
+    ev.preventDefault();
+    if (ev.ctrlKey) { if (ev.deltaY < 0) exitWalk(); return; }   // pinch-out leaves walk
+    walkSpeedMul = Math.max(0.25, Math.min(8, walkSpeedMul * (ev.deltaY < 0 ? 1.15 : 0.87)));
+  }, { passive: false });
+  addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'escape') { if (mode === 'walk') exitWalk(); return; }
+    const tracked = (k === 'shift' || k.startsWith('arrow'));
+    if (mode === 'walk' && tracked) { keys.add(k); e.preventDefault(); }
+  });
+  addEventListener('keyup', (e) => { keys.delete(e.key.toLowerCase()); });
+  addEventListener('blur', () => keys.clear());
+
+  // ---- north indicator ----
+  const ncv = document.getElementById('north').getContext('2d');
+  function drawNorth() {
+    // camera azimuth: scene -Z is north
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    const ang = Math.atan2(dir.x, -dir.z);  // heading; rotate arrow opposite
+    ncv.clearRect(0, 0, 56, 56);
+    ncv.save(); ncv.translate(28, 28); ncv.rotate(-ang);
+    ncv.strokeStyle = '#fff'; ncv.fillStyle = '#ff5b5b'; ncv.lineWidth = 2;
+    ncv.beginPath(); ncv.moveTo(0, -20); ncv.lineTo(7, 8); ncv.lineTo(0, 2); ncv.lineTo(-7, 8); ncv.closePath();
+    ncv.fill();
+    ncv.fillStyle = '#fff'; ncv.font = 'bold 11px sans-serif'; ncv.textAlign = 'center';
+    ncv.fillText('N', 0, -24); ncv.restore();
+  }
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+  let saveT = 0, lastT = performance.now();
+  function tick() {
+    requestAnimationFrame(tick);
+    const now = performance.now();
+    const dt = Math.min((now - lastT) / 1000, 0.1);   // clamp big gaps (tab switch)
+    lastT = now;
+    if (mode === 'walk') {
+      updateWalk(dt);
+    } else {
+      controls.update();
+      if (now - saveT > 800) {
+        saveT = now;
+        localStorage.setItem('bm3d_cam', JSON.stringify({
+          p: camera.position.toArray(), t: controls.target.toArray() }));
+      }
+    }
+    drawNorth();
+    renderer.render(scene, camera);
+  }
+  tick();
+}
+</script>
