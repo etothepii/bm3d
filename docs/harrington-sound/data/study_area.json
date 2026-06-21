@@ -1,0 +1,172 @@
+{
+  "parcels": [
+    {
+      "PARCELID": "32444",
+      "Owner": "",
+      "LocationPropertyName": "Rockhouse",
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.5220960378646851
+    },
+    {
+      "PARCELID": "38403",
+      "Owner": "",
+      "LocationPropertyName": "Somerstone",
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.5380426645278931
+    },
+    {
+      "PARCELID": "17522",
+      "Owner": "",
+      "LocationPropertyName": "Yahtzee",
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.4907081425189972
+    },
+    {
+      "PARCELID": "32443",
+      "Owner": "",
+      "LocationPropertyName": "VelCommer",
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.5065235495567322
+    },
+    {
+      "PARCELID": "19010",
+      "Owner": "",
+      "LocationPropertyName": "Cedarbury",
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.5816137194633484
+    },
+    {
+      "PARCELID": "32803",
+      "Owner": "",
+      "LocationPropertyName": null,
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.6949085593223572
+    },
+    {
+      "PARCELID": "33048",
+      "Owner": "Government of Bermuda",
+      "LocationPropertyName": "Summer Haven Nursing Home",
+      "Predominate_Zoning": null,
+      "Acreage": 3.1192712783813477
+    },
+    {
+      "PARCELID": "19284",
+      "Owner": "",
+      "LocationPropertyName": "The Mid Ocean Club and Golf Course",
+      "Predominate_Zoning": null,
+      "Acreage": 157.70343017578125
+    },
+    {
+      "PARCELID": "44798",
+      "Owner": "",
+      "LocationPropertyName": "Montalto",
+      "Predominate_Zoning": "Residential 2",
+      "Acreage": 1.3678840398788452
+    },
+    {
+      "PARCELID": "29746",
+      "Owner": "",
+      "LocationPropertyName": null,
+      "Predominate_Zoning": "Residential 1",
+      "Acreage": 0.14427891373634338
+    },
+    {
+      "PARCELID": "17821",
+      "Owner": "",
+      "LocationPropertyName": "Rock Landing",
+      "Predominate_Zoning": null,
+      "Acreage": 0.40602776408195496
+    },
+    {
+      "PARCELID": "20412",
+      "Owner": "",
+      "LocationPropertyName": "Four Star Pizza",
+      "Predominate_Zoning": null,
+      "Acreage": 0.2914374768733978
+    }
+  ],
+  "requested_ids": [
+    "32444",
+    "38403",
+    "17522",
+    "32443",
+    "19010",
+    "32803",
+    "33048",
+    "19284",
+    "44798",
+    "29746",
+    "17821",
+    "20412"
+  ],
+  "radius_m": 100.0,
+  "aoi_centroid_lonlat": [
+    -64.71694154690937,
+    32.33361474624933
+  ],
+  "scale_ground_per_merc": 0.8449481896583259,
+  "aoi_bbox_3857": [
+    -7207157.2925,
+    3805097.9821,
+    -7201356.6649,
+    3809267.7299
+  ],
+  "aoi_hull_3857": [
+    [
+      -7207157.293,
+      3806134.576
+    ],
+    [
+      -7206623.753,
+      3805624.154
+    ],
+    [
+      -7203959.128,
+      3805097.982
+    ],
+    [
+      -7203956.305,
+      3805098.468
+    ],
+    [
+      -7201359.384,
+      3806846.625
+    ],
+    [
+      -7201356.665,
+      3806880.486
+    ],
+    [
+      -7201366.768,
+      3806896.674
+    ],
+    [
+      -7201622.441,
+      3807178.698
+    ],
+    [
+      -7204063.15,
+      3809267.73
+    ],
+    [
+      -7206236.431,
+      3808408.686
+    ],
+    [
+      -7206249.198,
+      3808394.116
+    ]
+  ],
+  "study_bbox_3857": [
+    -7207275.642951808,
+    3804979.6316481926,
+    -7201238.314448193,
+    3809386.0803518076
+  ],
+  "dem": {
+    "nx": 1307,
+    "ny": 954,
+    "zmin": 0.0,
+    "zmax": 77.84900665283203
+  }
+}
