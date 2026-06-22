@@ -52,18 +52,19 @@
 
   <div class="row">
     <label for="ve">Vertical exaggeration</label>
-    <span><span id="ve_val">2.0</span>&times;</span>
+    <span><span id="ve_val">1.0</span>&times;</span>
   </div>
-  <div class="row"><input type="range" id="ve" min="1" max="6" step="0.5" value="2" style="width:100%"></div>
+  <div class="row"><input type="range" id="ve" min="1" max="6" step="0.5" value="1" style="width:100%"></div>
 
   <hr>
   <div class="row"><label><input type="checkbox" id="t_img" checked> Imagery</label></div>
-  <div class="row"><label><input type="checkbox" id="t_con"> Contours</label></div>
+  <div class="row"><label><input type="checkbox" id="t_con" checked> Contours</label></div>
   <div class="row"><label><input type="checkbox" id="t_par"> Parcels</label></div>
-  <div class="row"><label><input type="checkbox" id="t_bld"> Buildings</label></div>
+  <div class="row"><label><input type="checkbox" id="t_bld" checked> Buildings</label></div>
 
   <hr>
   <div class="row"><button id="reset">Reset view</button></div>
+  <div class="row"><button id="exitwalk" style="display:none">Exit walk mode</button></div>
 
   <hr>
   <div class="stat" id="aoi"></div>
@@ -246,8 +247,10 @@ async function main() {
 
   // parcels
   const parcelGroup = new THREE.Group(); group.add(parcelGroup);
-  const matReq = new THREE.LineBasicMaterial({ color: 0xffd34d, depthTest: false, transparent: true });
-  const matOther = new THREE.LineBasicMaterial({ color: 0x66e0ff, depthTest: false, transparent: true, opacity: 0.55 });
+  // depthTest:true so parcels are occluded by terrain in front of them — they
+  // read as painted onto the ground, not floating x-ray lines through hills.
+  const matReq = new THREE.LineBasicMaterial({ color: 0xffd34d });
+  const matOther = new THREE.LineBasicMaterial({ color: 0x66e0ff, transparent: true, opacity: 0.6 });
   const parcelFeats = await addPolygons('./data/parcels.geojson', parcelGroup,
     (f) => requested.has(String(f.properties.PARCELID)) ? matReq : matOther, 0.8);
 
@@ -266,60 +269,101 @@ async function main() {
     };
     const pushRTri = (a, b, c) => { pushR(a); pushR(b); pushR(c); };
     const V = (sx, y, sz, mx, my, b) => ({ x: sx, y, z: sz, mx, my, b });
-    const lightDir = new THREE.Vector3(-0.5, 1, 0.7).normalize();   // baked roof shade
+    // distance from point (x,z) to the nearest point on the footprint boundary
+    const distToBoundary = (x, z, edges) => {
+      let best = Infinity;
+      for (const [a, b] of edges) {
+        const dx = b[0] - a[0], dz = b[1] - a[1];
+        const L2 = dx * dx + dz * dz || 1;
+        let t = ((x - a[0]) * dx + (z - a[1]) * dz) / L2;
+        t = Math.max(0, Math.min(1, t));
+        const px = a[0] + t * dx, pz = a[1] + t * dz;
+        const d = Math.hypot(x - px, z - pz);
+        if (d < best) best = d;
+      }
+      return best;
+    };
     for (const f of (fc.features || [])) {
       const ringRaw = f.geometry.coordinates[0];
       if (!ringRaw || ringRaw.length < 4) continue;
       const ring = ringRaw.slice(0, -1);          // drop closing duplicate
       if (ring.length < 3) continue;
       const base = f.properties.base_m ?? 0;
-      const top = base + (f.properties.height_m ?? 5);
-      const sc = ring.map(([mx, my]) => mercToScene(mx, my));   // base/roof ring scene
+      const top = base + (f.properties.height_m ?? 5);   // overall building top
+      const sc = ring.map(([mx, my]) => mercToScene(mx, my));   // footprint ring scene
       const n = ring.length;
-      // vertical walls — plain grey (no imagery)
-      for (let i = 0; i < n; i++) {
-        const j = (i + 1) % n;
-        const a = V(sc[i][0], base, sc[i][1]);
-        const b = V(sc[j][0], base, sc[j][1]);
-        const c = V(sc[j][0], top, sc[j][1]);
-        const d = V(sc[i][0], top, sc[i][1]);
-        pushWTri(a, b, c); pushWTri(a, c, d);
-      }
-      if (f.properties.roof_white) {
-        // white (lime-washed) roof -> 45° pitched hip roof: faces rise from the
-        // eaves to an apex over the centroid; the roof image projects onto them.
-        let cxS = 0, czS = 0, cmx = 0, cmy = 0;
-        for (let k = 0; k < n; k++) { cxS += sc[k][0]; czS += sc[k][1]; cmx += ring[k][0]; cmy += ring[k][1]; }
-        cxS /= n; czS /= n; cmx /= n; cmy /= n;
-        let run = 0;
-        for (let k = 0; k < n; k++) run += Math.hypot(sc[k][0] - cxS, sc[k][1] - czS);
-        run /= n;
-        const apexY = top + Math.min(run, 7);   // 45° => rise == run; cap big spans
-        for (let i = 0; i < n; i++) {
-          const j = (i + 1) % n;
-          const e1 = V(sc[i][0], top, sc[i][1], ring[i][0], ring[i][1], 1);
-          const e2 = V(sc[j][0], top, sc[j][1], ring[j][0], ring[j][1], 1);
-          const ap = V(cxS, apexY, czS, cmx, cmy, 1);
-          // bake a face shade from its normal so the pitch reads (unlit material)
-          const ux = e2.x - e1.x, uy = e2.y - e1.y, uz = e2.z - e1.z;
-          const vx = ap.x - e1.x, vy = ap.y - e1.y, vz = ap.z - e1.z;
-          let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
-          const ln = Math.hypot(nx, ny, nz) || 1; nx /= ln; ny /= ln; nz /= ln;
-          const sh = 0.62 + 0.38 * Math.max(0, nx * lightDir.x + ny * lightDir.y + nz * lightDir.z);
-          e1.b = sh; e2.b = sh; ap.b = sh;
-          pushRTri(e1, e2, ap);
-        }
-      } else {
-        // non-white roof -> flat (triangulated; handles non-convex footprints)
+
+      // flat roof at height y — full-brightness orthophoto (exact pixel colour)
+      const flatRoof = (y) => {
         const contour = sc.map(([sx, sz]) => new THREE.Vector2(sx, sz));
         let tris = [];
         try { tris = THREE.ShapeUtils.triangulateShape(contour, []); } catch { tris = []; }
-        for (const t of tris) {
-          pushRTri(
-            V(sc[t[0]][0], top, sc[t[0]][1], ring[t[0]][0], ring[t[0]][1], 1),
-            V(sc[t[1]][0], top, sc[t[1]][1], ring[t[1]][0], ring[t[1]][1], 1),
-            V(sc[t[2]][0], top, sc[t[2]][1], ring[t[2]][0], ring[t[2]][1], 1));
+        for (const t of tris) pushRTri(
+          V(sc[t[0]][0], y, sc[t[0]][1], ring[t[0]][0], ring[t[0]][1], 1),
+          V(sc[t[1]][0], y, sc[t[1]][1], ring[t[1]][0], ring[t[1]][1], 1),
+          V(sc[t[2]][0], y, sc[t[2]][1], ring[t[2]][0], ring[t[2]][1], 1));
+      };
+
+      let wallTop = top;
+      if (f.properties.roof_white) {
+        // white (lime-washed) roof -> uniform 20° straight-skeleton roof. The
+        // roof surface is exactly height = tan(20°) * (distance to the nearest
+        // boundary point): every wall slopes inward at 20°, faces meet at ridges,
+        // and reflex corners form valleys — correct for COMPLEX (concave)
+        // polygons, with intersections coming from any direction. Rendered by
+        // triangulating the footprint and subdividing, sampling that field.
+        // Roof image at EXACT pixel colour (no shading — grey is walls-only).
+        try {
+          const PITCH = 20 * Math.PI / 180, tanP = Math.tan(PITCH);
+          const contour = sc.map(([sx, sz]) => new THREE.Vector2(sx, sz));
+          let tris = THREE.ShapeUtils.triangulateShape(contour, []);
+          if (!tris.length) throw new Error('degenerate');
+          const verts = sc.map(p => [p[0], p[1]]);        // mesh verts (scene x,z)
+          let mesh = tris.map(t => [t[0], t[1], t[2]]);
+          // subdivide so the distance field (ridges/valleys) is well sampled
+          let dim = 0;
+          { let xn = 1e9, xx = -1e9, zn = 1e9, zx = -1e9;
+            for (const p of sc) { xn = Math.min(xn, p[0]); xx = Math.max(xx, p[0]); zn = Math.min(zn, p[1]); zx = Math.max(zx, p[1]); }
+            dim = Math.max(xx - xn, zx - zn); }
+          const levels = Math.min(4, Math.max(1, Math.round(Math.log2(Math.max(2, dim) / 2))));
+          for (let lv = 0; lv < levels; lv++) {
+            const mid = new Map(), nt = [];
+            const midpoint = (a, b) => {
+              const key = a < b ? a + '_' + b : b + '_' + a;
+              let m = mid.get(key);
+              if (m === undefined) { m = verts.length; verts.push([(verts[a][0] + verts[b][0]) / 2, (verts[a][1] + verts[b][1]) / 2]); mid.set(key, m); }
+              return m;
+            };
+            for (const [a, b, c] of mesh) {
+              const ab = midpoint(a, b), bc = midpoint(b, c), ca = midpoint(c, a);
+              nt.push([a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]);
+            }
+            mesh = nt;
+          }
+          const edges = [];
+          for (let i = 0; i < n; i++) edges.push([sc[i], sc[(i + 1) % n]]);
+          const dist = verts.map(v => distToBoundary(v[0], v[1], edges));
+          let maxD = 0; for (const d of dist) if (d > maxD) maxD = d;
+          const apexH = tanP * maxD;
+          wallTop = Math.max(base, top - apexH);          // height reduced by the roof
+          const eaveY = wallTop;
+          const Vm = verts.map((v, i) => {
+            const [mx, my] = sceneToMerc(v[0], v[1]);
+            return V(v[0], eaveY + tanP * dist[i], v[1], mx, my, 1);
+          });
+          for (const [a, b, c] of mesh) pushRTri(Vm[a], Vm[b], Vm[c]);
+        } catch (_) {
+          wallTop = top; flatRoof(top);          // fallback: flat roof
         }
+      } else {
+        flatRoof(top);                           // non-white roof -> flat
+      }
+
+      // vertical walls — plain grey (no imagery), up to the eave (wallTop)
+      for (let i = 0; i < n; i++) {
+        const j = (i + 1) % n;
+        pushWTri(V(sc[i][0], base, sc[i][1]), V(sc[j][0], base, sc[j][1]), V(sc[j][0], wallTop, sc[j][1]));
+        pushWTri(V(sc[i][0], base, sc[i][1]), V(sc[j][0], wallTop, sc[j][1]), V(sc[i][0], wallTop, sc[i][1]));
       }
     }
     // walls: plain grey, unlit
@@ -329,7 +373,7 @@ async function main() {
       bldGroup.add(new THREE.Mesh(gw,
         new THREE.MeshBasicMaterial({ color: 0x9b978f, side: THREE.DoubleSide })));
     }
-    // roofs: draped orthophoto (fully opaque, true-colour), pitch baked into shade
+    // roofs: draped orthophoto at exact pixel colour (no shading; grey is walls-only)
     if (RP.length) {
       const gr = new THREE.BufferGeometry();
       gr.setAttribute('position', new THREE.BufferAttribute(new Float32Array(RP), 3));
@@ -441,9 +485,45 @@ async function main() {
   // tap-to-identify: remember where the press started; only pick if the finger/
   // mouse barely moved (otherwise it was an orbit/pan/pinch gesture, not a tap).
   let downXY = null;
-  renderer.domElement.addEventListener('pointerdown', (ev) => { downXY = [ev.clientX, ev.clientY]; });
-  renderer.domElement.addEventListener('pointercancel', () => { downXY = null; });
+  let lpTimer = null;                 // long-press-to-enter-walk timer
+  const cancelLongPress = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = null; } };
+  renderer.domElement.addEventListener('pointerdown', (ev) => {
+    downXY = [ev.clientX, ev.clientY];
+    if (mode === 'walk') {
+      if (dragId === null) {                       // one drag pointer steers/throttles
+        dragId = ev.pointerId; lastX = ev.clientX; lastY = ev.clientY;
+        try { renderer.domElement.setPointerCapture(ev.pointerId); } catch (_) {}
+      }
+    } else {
+      // long-press to enter walk mode (touch-friendly; double-click also works)
+      cancelLongPress();
+      const id = ev.pointerId, x = ev.clientX, y = ev.clientY;
+      lpTimer = setTimeout(() => {
+        lpTimer = null;
+        ndc.x = (x / innerWidth) * 2 - 1; ndc.y = -(y / innerHeight) * 2 + 1;
+        ray.setFromCamera(ndc, camera);
+        const hit = ray.intersectObject(terrain, false)[0];
+        if (hit) { enterWalk(hit.point.x, hit.point.z); dragId = id; lastX = x; lastY = y; }
+      }, 500);
+    }
+  });
+  renderer.domElement.addEventListener('pointermove', (ev) => {
+    if (mode === 'walk') {
+      if (ev.pointerId === dragId) {
+        yaw += (ev.clientX - lastX) * STEER_PER_PX;                        // drag L/R = steer
+        walkSpeed = Math.max(0, Math.min(SPEED_RUN, walkSpeed + (lastY - ev.clientY) * DRAG_SPEED_PER_PX));  // drag up = faster
+        lastX = ev.clientX; lastY = ev.clientY;
+      }
+      return;
+    }
+    // orbit: a moving pointer is an orbit/pan drag, so it isn't a long-press
+    if (lpTimer && downXY && Math.hypot(ev.clientX - downXY[0], ev.clientY - downXY[1]) > 10) cancelLongPress();
+  });
+  const endDrag = (ev) => { if (ev.pointerId === dragId) dragId = null; };
+  renderer.domElement.addEventListener('pointercancel', (ev) => { downXY = null; cancelLongPress(); endDrag(ev); });
   renderer.domElement.addEventListener('pointerup', (ev) => {
+    if (mode === 'walk') { downXY = null; endDrag(ev); return; }   // cruise continues after release
+    cancelLongPress();
     if (!downXY) return;
     const moved = Math.hypot(ev.clientX - downXY[0], ev.clientY - downXY[1]);
     downXY = null;
@@ -461,6 +541,90 @@ async function main() {
       'lon <b>' + lon.toFixed(6) + '</b>  lat <b>' + lat.toFixed(6) + '</b>  ' +
       'elev <b>' + elevation.toFixed(1) + ' m</b>' + (pid ? '  parcel <b>' + pid + '</b>' : '');
   });
+
+  // ---- first-person walk mode ----
+  // Enter: long-press the terrain (touch) or double-click (mouse). You stand with
+  // eyes ~170 cm above the ground at that spot, which tracks your elevation as you
+  // move. Throttle model: scroll/drag UP = faster (and starts you walking), DOWN =
+  // slower; drag L/R (or arrows) = steer; double-click = stop; Exit via the menu.
+  const EYE_M = 1.70;
+  const SPEED_RUN = 9.835;          // 22 mph in m/s — top speed
+  const TURN_RATE = 1.6;            // rad/s, keyboard turn
+  const STEER_PER_PX = 0.006;       // rad per px of horizontal drag
+  const DRAG_SPEED_PER_PX = 0.05;   // m/s change per px of vertical drag
+  const WHEEL_STEP = 0.8;           // m/s change per wheel notch
+  const KEY_ACCEL = 5.0;            // m/s^2 for arrow up/down
+  let mode = 'orbit';
+  let walkX = 0, walkZ = 0, yaw = 0, savedCam = null, savedVE = 1;
+  let dragId = null, lastX = 0, lastY = 0, walkSpeed = 0;   // walkSpeed persists (cruise)
+  const keys = new Set();
+  const readoutEl = document.getElementById('readout');
+  const exitBtn = document.getElementById('exitwalk');
+  const ORBIT_HINT = 'Tap to read lon / lat / elevation · long-press or double-click to walk.';
+  readoutEl.textContent = ORBIT_HINT;
+
+  function groundAtScene(sx, sz) {
+    const [mx, my] = sceneToMerc(sx, sz);
+    return elevMerc(mx, my);              // true elevation in metres
+  }
+  function enterWalk(sx, sz) {
+    mode = 'walk';
+    walkX = sx; walkZ = sz; walkSpeed = 0; dragId = null; cancelLongPress();
+    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+    yaw = Math.atan2(dir.x, -dir.z);      // start facing current view direction
+    savedCam = { p: camera.position.toArray(), t: controls.target.toArray() };
+    savedVE = group.scale.y;
+    group.scale.y = 1;                    // true scale so 170 cm is realistic
+    controls.enabled = false;
+    exitBtn.style.display = '';
+    readoutEl.innerHTML = '<b>Walk mode</b> — scroll/drag <b>up</b> = faster, ' +
+      '<b>down</b> = slower; drag L/R = steer; double-click = stop; Exit in the ☰ menu.';
+  }
+  function exitWalk() {
+    mode = 'orbit'; dragId = null;
+    group.scale.y = savedVE;
+    controls.enabled = true;
+    if (savedCam) { camera.position.fromArray(savedCam.p); controls.target.fromArray(savedCam.t); }
+    controls.update();
+    exitBtn.style.display = 'none';
+    readoutEl.textContent = ORBIT_HINT;
+  }
+  exitBtn.addEventListener('click', exitWalk);
+  function updateWalk(dt) {
+    if (keys.has('arrowleft')) yaw -= TURN_RATE * dt;
+    if (keys.has('arrowright')) yaw += TURN_RATE * dt;
+    if (keys.has('arrowup')) walkSpeed = Math.min(SPEED_RUN, walkSpeed + KEY_ACCEL * dt);
+    if (keys.has('arrowdown')) walkSpeed = Math.max(0, walkSpeed - KEY_ACCEL * dt);
+    const fx = Math.sin(yaw), fz = -Math.cos(yaw);   // yaw 0 => facing north (-Z)
+    const step = walkSpeed * dt;                     // cruise at the set speed
+    walkX = Math.max(-W / 2, Math.min(W / 2, walkX + fx * step));
+    walkZ = Math.max(-D / 2, Math.min(D / 2, walkZ + fz * step));
+    const ve = group.scale.y;   // normally 1 in walk mode; respect it if changed
+    camera.position.set(walkX, groundAtScene(walkX, walkZ) * ve + EYE_M, walkZ);
+    const tx = walkX + fx, tz = walkZ + fz;
+    camera.lookAt(tx, groundAtScene(tx, tz) * ve + EYE_M, tz);
+  }
+  renderer.domElement.addEventListener('dblclick', (ev) => {
+    if (mode === 'walk') { walkSpeed = 0; return; }   // double-click = stop
+    ndc.x = (ev.clientX / innerWidth) * 2 - 1;
+    ndc.y = -(ev.clientY / innerHeight) * 2 + 1;
+    ray.setFromCamera(ndc, camera);
+    const hit = ray.intersectObject(terrain, false)[0];
+    if (hit) enterWalk(hit.point.x, hit.point.z);
+  });
+  // wheel: scroll up = faster, down = slower
+  renderer.domElement.addEventListener('wheel', (ev) => {
+    if (mode !== 'walk') return;
+    ev.preventDefault();
+    walkSpeed = Math.max(0, Math.min(SPEED_RUN, walkSpeed + (ev.deltaY < 0 ? WHEEL_STEP : -WHEEL_STEP)));
+  }, { passive: false });
+  addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if (k === 'escape') { if (mode === 'walk') exitWalk(); return; }
+    if (mode === 'walk' && k.startsWith('arrow')) { keys.add(k); e.preventDefault(); }
+  });
+  addEventListener('keyup', (e) => { keys.delete(e.key.toLowerCase()); });
+  addEventListener('blur', () => keys.clear());
 
   // ---- north indicator ----
   const ncv = document.getElementById('north').getContext('2d');
@@ -482,17 +646,24 @@ async function main() {
     renderer.setSize(innerWidth, innerHeight);
   });
 
-  let saveT = 0;
+  let saveT = 0, lastT = performance.now();
   function tick() {
     requestAnimationFrame(tick);
-    controls.update();
+    const now = performance.now();
+    const dt = Math.min((now - lastT) / 1000, 0.1);   // clamp big gaps (tab switch)
+    lastT = now;
+    if (mode === 'walk') {
+      updateWalk(dt);
+    } else {
+      controls.update();
+      if (now - saveT > 800) {
+        saveT = now;
+        localStorage.setItem('bm3d_cam', JSON.stringify({
+          p: camera.position.toArray(), t: controls.target.toArray() }));
+      }
+    }
     drawNorth();
     renderer.render(scene, camera);
-    if (performance.now() - saveT > 800) {
-      saveT = performance.now();
-      localStorage.setItem('bm3d_cam', JSON.stringify({
-        p: camera.position.toArray(), t: controls.target.toArray() }));
-    }
   }
   tick();
 }

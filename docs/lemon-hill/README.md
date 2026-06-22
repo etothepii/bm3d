@@ -1,6 +1,6 @@
-# Bermuda parcel 3D terrain — 27880, 20069
+# Bermuda parcel 3D terrain — 27880
 
-Interactive 3D render of Lemon Hill / Port Royal Golf Course (parcels 27880, 20069) with a 500.0 m buffer.
+Interactive 3D render of Lemon Hill (parcel 27880) with a 500.0 m buffer.
 Orthophoto-draped DEM with contour lines and parcel boundaries. Pure static site:
 no application server, no CDN, works on GitHub Pages from a project sub-path.
 
